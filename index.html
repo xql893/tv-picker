@@ -1,0 +1,265 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>TV 选台工具（实时源）</title>
+<style>
+  :root{--bg:#0f1115;--card:#1a1d24;--line:#2a2f3a;--txt:#e8eaed;--sub:#9aa3b2;--acc:#4f8cff}
+  *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif;
+       background:var(--bg);color:var(--txt);font-size:15px;padding-bottom:66px}
+  header{padding:12px 14px 8px;border-bottom:1px solid var(--line);position:sticky;top:0;background:var(--bg);z-index:5}
+  h1{font-size:18px;margin:0 0 8px}
+  .controls{display:flex;gap:8px;flex-wrap:wrap}
+  input,select{background:var(--card);color:var(--txt);border:1px solid var(--line);
+    border-radius:10px;padding:9px 10px;font-size:15px;outline:none}
+  input[type=search]{flex:1;min-width:130px}
+  select{min-width:104px}
+  button{background:var(--acc);color:#fff;border:none;border-radius:10px;padding:9px 14px;font-size:15px;cursor:pointer}
+  button.ghost{background:var(--card);color:var(--txt);border:1px solid var(--line)}
+  .status{padding:8px 14px;color:var(--sub);font-size:13px}
+  #playerCard{margin:8px 12px;background:var(--card);border:1px solid var(--line);border-radius:12px;overflow:hidden;display:none}
+  #player{width:100%;max-height:46vh;background:#000;display:block}
+  .now{display:flex;justify-content:space-between;align-items:center;padding:8px 12px;gap:8px}
+  .now b{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .ext{color:var(--acc);text-decoration:none;font-size:13px;white-space:nowrap}
+  ul{list-style:none;margin:0;padding:0}
+  li{display:flex;align-items:center;gap:10px;padding:10px 12px;border-bottom:1px solid var(--line)}
+  li img{width:46px;height:46px;border-radius:8px;object-fit:contain;background:#000;flex:none}
+  .meta{flex:1;min-width:0}
+  .meta .nm{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .meta .gr{color:var(--sub);font-size:12px}
+  .acts{display:flex;gap:6px;flex:none}
+  .acts button{padding:7px 10px;font-size:13px}
+  .chk{width:20px;height:20px;flex:none;accent-color:var(--acc)}
+  .empty{padding:30px 14px;text-align:center;color:var(--sub)}
+  #bar{position:fixed;left:0;right:0;bottom:0;background:var(--card);border-top:1px solid var(--line);
+    display:flex;align-items:center;gap:10px;padding:10px 14px;z-index:6}
+  #bar .cnt{color:var(--sub);font-size:14px;flex:1}
+  .note{font-size:12px;color:var(--sub);padding:6px 14px 2px;line-height:1.5}
+  .toast{position:fixed;left:50%;top:16%;transform:translateX(-50%);background:rgba(0,0,0,.85);
+    color:#fff;padding:8px 14px;border-radius:10px;font-size:13px;z-index:20;display:none}
+</style>
+</head>
+<body>
+<header>
+  <h1>TV 选台工具（实时源）</h1>
+  <div class="controls">
+    <input id="q" type="search" placeholder="搜索频道名，如 CCTV / BBC / 体育" onkeydown="if(event.key==='Enter')search()">
+    <select id="category"><option value="">全部分类</option></select>
+    <select id="country"><option value="">全部国家</option></select>
+    <button onclick="search()">搜索</button>
+    <button class="ghost" id="refreshBtn" onclick="refresh(true)">刷新源</button>
+  </div>
+</header>
+<div class="status" id="status">加载中…</div>
+<div id="playerCard">
+  <video id="player" controls playsinline></video>
+  <div class="now"><b id="nowName">—</b>
+    <a class="ext" id="extLink" href="#" target="_blank" rel="noopener">用外部播放器打开 ↗</a></div>
+</div>
+<div class="note">源链接每次打开实时从 iptv-org 拉取，保持最新可用；页内播放依赖浏览器（iOS 最佳），Android 页内放不了请点「↗」；导出 M3U 给电脑 VLC 用。</div>
+<ul id="list"></ul>
+<div class="empty" id="empty" style="display:none">没有匹配的频道，换个关键词试试。</div>
+<div id="bar">
+  <span class="cnt" id="barCnt">已选 0 个</span>
+  <button class="ghost" onclick="selectAll()">全选匹配</button>
+  <button onclick="exportM3U()">导出 M3U</button>
+</div>
+<div class="toast" id="toast"></div>
+
+<script src="https://cdn.jsdelivr.net/npm/hls.js@1"></script>
+<script>
+const M3U_URL = "https://iptv-org.github.io/iptv/index.m3u";
+const COUNTRY_URL = "https://iptv-org.github.io/api/countries.json";
+const CK = "tv_m3u_cache_v3";
+let CHANNELS = [], CATEGORIES = [], COUNTRIES = [], COUNTRY_MAP = {};
+let currentItems = [], rendered = 0;
+let selectedIds = new Set();
+const PAGE = 200;
+let hls = null;
+
+function toast(m){const t=document.getElementById('toast');t.textContent=m;t.style.display='block';clearTimeout(t._t);t._t=setTimeout(()=>t.style.display='none',1800);}
+function setStatus(m){document.getElementById('status').textContent=m;}
+function escapeHtml(s){return (s||'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
+function enc(s){return (s||'').replace(/'/g,"\\'").replace(/"/g,'&quot;');}
+
+function buildCountryMap(arr){const m={};(arr||[]).forEach(c=>{m[(c.code||'').toUpperCase()]={name:c.name,flag:c.flag||''};});return m;}
+function parseM3U(text){
+  const lines=text.split(/\r?\n/); const ch=[]; let cur=null;
+  for(const line of lines){
+    if(line.startsWith("#EXTINF")){
+      const idM=line.match(/tvg-id="([^"]*)"/);
+      const logoM=line.match(/tvg-logo="([^"]*)"/);
+      const grpM=line.match(/group-title="([^"]*)"/);
+      const nmM=line.match(/,([^\r\n]*)$/);
+      let cid=idM?idM[1]:'';
+      if(cid.includes('@')) cid=cid.split('@')[0];
+      let country='',flag='';
+      if(cid.includes('.')){const suf=cid.split('.').pop().toUpperCase();const cm=COUNTRY_MAP[suf];if(suf.length===2&&cm){country=cm.name;flag=cm.flag;}}
+      cur={id:cid,name:nmM?nmM[1].trim():'',logo:logoM?logoM[1]:'',group:grpM?grpM[1]:'',url:'',country,flag};
+      ch.push(cur);
+    } else if(line.startsWith('#')){ /* 跳过 #EXTVLCOPT 等注释 */ }
+    else if(line.trim() && cur){ cur.url=line.trim(); cur=null; }
+  }
+  return ch;
+}
+
+function saveCache(ch){try{localStorage.setItem(CK,JSON.stringify({t:Date.now(),ch}));}catch(e){}}
+function loadCache(){try{const o=JSON.parse(localStorage.getItem(CK));if(o&&o.ch&&o.ch.length)return o;}catch(e){}return null;}
+
+function populate(selId, arr){
+  const sel=document.getElementById(selId); const prev=sel.value;
+  sel.innerHTML='<option value="">'+(selId==='category'?'全部分类':'全部国家')+'</option>';
+  arr.forEach(v=>{const o=document.createElement('option');o.value=v;o.textContent=v;sel.appendChild(o);});
+  if([...sel.options].some(o=>o.value===prev)) sel.value=prev;
+}
+
+function buildUI(){
+  populate('category',CATEGORIES); populate('country',COUNTRIES);
+  search();
+}
+
+async function refresh(showLoading){
+  if(showLoading) setStatus('正在获取最新频道源（约 2.6MB）…');
+  try{
+    const text=await (await fetch(M3U_URL)).text();
+    CHANNELS=parseM3U(text);
+    const catSet=new Set(), ctySet=new Set();
+    CHANNELS.forEach(c=>{if(c.group)catSet.add(c.group);if(c.country)ctySet.add(c.country);});
+    CATEGORIES=[...catSet].sort(); COUNTRIES=[...ctySet].sort();
+    saveCache(CHANNELS);
+    buildUI();
+    setStatus(`已更新 · 共 ${CHANNELS.length} 个频道 · 更新时间 ${new Date().toLocaleTimeString()}`);
+  }catch(e){
+    setStatus('获取最新源失败：'+e+'（若已用缓存则仍可浏览，点「刷新源」重试）');
+    toast('拉取失败，请检查网络后点刷新源');
+  }
+}
+
+async function init(){
+  setStatus('正在加载国家列表…');
+  try{ COUNTRY_MAP=buildCountryMap(await (await fetch(COUNTRY_URL)).json()); }catch(e){ console.warn('countries load failed',e); }
+  const cached=loadCache();
+  if(cached && cached.ch && cached.ch.length){
+    CHANNELS=cached.ch;
+    const catSet=new Set(), ctySet=new Set();
+    CHANNELS.forEach(c=>{if(c.group)catSet.add(c.group);if(c.country)ctySet.add(c.country);});
+    CATEGORIES=[...catSet].sort(); COUNTRIES=[...ctySet].sort();
+    buildUI();
+    setStatus(`已用本地缓存 ${CHANNELS.length} 个 · 后台刷新中…`);
+    refresh(false);
+  } else {
+    await refresh(true);
+  }
+}
+
+function search(){
+  const q=document.getElementById('q').value.trim().toLowerCase();
+  const category=document.getElementById('category').value;
+  const country=document.getElementById('country').value;
+  currentItems=CHANNELS.filter(ch=>{
+    if(category && ch.group!==category) return false;
+    if(country && ch.country!==country) return false;
+    if(q && !(ch.name.toLowerCase().includes(q) || ch.id.toLowerCase().includes(q))) return false;
+    return true;
+  });
+  document.getElementById('empty').style.display = currentItems.length? 'none':'block';
+  const list=document.getElementById('list'); list.innerHTML='';
+  rendered=0;
+  renderMore();
+  updateCnt();
+}
+
+function renderMore(){
+  if(rendered>=currentItems.length) return;
+  const list=document.getElementById('list');
+  const batch=currentItems.slice(rendered,rendered+PAGE);
+  batch.forEach(ch=>{
+    const li=document.createElement('li');
+    const logo = ch.logo? `<img src="${ch.logo}" onerror="this.style.visibility='hidden'" alt="">`:'<img alt="">';
+    const flag = ch.flag? ch.flag+' ':'';
+    const chk = selectedIds.has(ch.id)? 'checked':'';
+    li.innerHTML=`<input type="checkbox" class="chk" data-id="${escapeHtml(ch.id)}" ${chk}>
+      ${logo}
+      <div class="meta"><div class="nm">${escapeHtml(ch.name)||escapeHtml(ch.id)}</div>
+      <div class="gr">${flag}${escapeHtml(ch.group||'')}</div></div>
+      <div class="acts"><button onclick="play('${enc(ch.url)}','${enc(ch.name)}')">播放</button></div>`;
+    list.appendChild(li);
+  });
+  rendered+=batch.length;
+  document.getElementById('status').textContent=
+    `匹配 ${currentItems.length} 个，已显示 ${rendered} 个`+(rendered<currentItems.length?`（滚动加载更多）`:'');
+}
+
+function onScroll(){
+  if(rendered>=currentItems.length) return;
+  if(window.innerHeight+window.scrollY >= document.body.offsetHeight-500){
+    renderMore();
+  }
+}
+window.addEventListener('scroll',onScroll);
+
+function play(url,name){
+  const video=document.getElementById('player');
+  const card=document.getElementById('playerCard');
+  card.style.display='block';
+  document.getElementById('nowName').textContent=name||'';
+  document.getElementById('extLink').href=url;
+  if(hls){hls.destroy();hls=null;}
+  const isHls = /\.m3u8(\?|$)/.test(url) || url.includes('m3u8');
+  if(isHls && !video.canPlayType('application/vnd.apple.mpegurl')){
+    if(window.Hls && Hls.isSupported()){
+      hls=new Hls();
+      hls.loadSource(url); hls.attachMedia(video);
+      hls.on(Hls.Events.MANIFEST_PARSED,()=>video.play().catch(()=>{}));
+      hls.on(Hls.Events.ERROR,(_,d)=>{ if(d.fatal){ toast('该源页内无法播放，请点 ↗ 用外部播放器'); }});
+    }else{ video.src=url; video.play().catch(()=>{}); }
+  }else{ video.src=url; video.play().catch(()=>{}); }
+  card.scrollIntoView({behavior:'smooth'});
+}
+
+function updateCnt(){
+  document.getElementById('barCnt').textContent='已选 '+selectedIds.size+' 个';
+}
+document.addEventListener('change',e=>{
+  if(e.target.classList.contains('chk')){
+    const id=e.target.dataset.id;
+    if(e.target.checked) selectedIds.add(id); else selectedIds.delete(id);
+    updateCnt();
+  }
+});
+
+function selectAll(){
+  const allSelected = currentItems.length>0 && currentItems.every(c=>selectedIds.has(c.id));
+  if(allSelected){
+    currentItems.forEach(c=>selectedIds.delete(c.id));
+    toast('已取消全选');
+  }else{
+    currentItems.forEach(c=>selectedIds.add(c.id));
+    toast('已全选匹配的全部 '+currentItems.length+' 个');
+  }
+  document.querySelectorAll('.chk').forEach(b=>{ b.checked=selectedIds.has(b.dataset.id); });
+  updateCnt();
+}
+
+function exportM3U(){
+  const picked = selectedIds.size? CHANNELS.filter(c=>selectedIds.has(c.id)) : currentItems;
+  const lines=['#EXTM3U'];
+  picked.forEach(ch=>{ if(!ch.url) return;
+    const logo=ch.logo?` tvg-logo="${ch.logo}"`:'';
+    const grp=ch.group?` group-title="${ch.group}"`:'';
+    lines.push(`#EXTINF:-1 tvg-id="${ch.id}"${logo}${grp},${ch.name}`);
+    lines.push(ch.url);
+  });
+  const blob=new Blob([lines.join('\n')+'\n'],{type:'audio/x-mpegurl'});
+  const a=document.createElement('a'); a.href=URL.createObjectURL(blob);
+  a.download='tv-playlist.m3u'; document.body.appendChild(a); a.click(); a.remove();
+  toast(selectedIds.size?`已导出 ${selectedIds.size} 个频道`:`未勾选，已导出匹配的全部 ${currentItems.length} 个`);
+}
+
+init();
+</script>
+</body>
+</html>
